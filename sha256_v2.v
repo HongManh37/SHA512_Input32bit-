@@ -4,10 +4,10 @@ module sha256_v2(
     input wire i_write,
     input wire [7:0] i_N, // số block 
     input wire [8:0] i_bit_miss, // số bit thiếu ở block cuối 
+    input wire i_read, 
     input wire [31:0] i_data,
     output reg [31:0] o_data,
-    output reg o_done,
-    output reg [3:0] o_read
+    output reg o_done
 );
     parameter IDLE = 3'd0,
             GETDATA = 3'd1,
@@ -21,6 +21,7 @@ module sha256_v2(
     reg i_write_reg;
     reg [31:0] i_data_reg;
     reg [8:0] i_bit_miss_reg;
+    reg i_read_reg;
 
     // rest of your regs
     reg [2:0] state, next_state;
@@ -35,7 +36,8 @@ module sha256_v2(
     reg clr_i;
     reg clr_data;
     reg calc_w;
-    wire [511:0] data_use;
+    reg [3:0] cnt_read;
+    reg [511:0] data_use;
     wire [511:0] padded_block;
     wire [31:0] k_j;
     wire [31:0] w_out;
@@ -146,19 +148,13 @@ module sha256_v2(
             end
 
             READ: begin
-                if (o_read == 4'd8) begin
+                if (cnt_read == 4'd7) begin
                     next_state = IDLE;
                 end
             end
             default: next_state = state;
         endcase
     end
-    assign data_use = {
-        data_use_reg[0], data_use_reg[1], data_use_reg[2], data_use_reg[3],
-        data_use_reg[4], data_use_reg[5], data_use_reg[6], data_use_reg[7],
-        data_use_reg[8], data_use_reg[9], data_use_reg[10], data_use_reg[11],
-        data_use_reg[12], data_use_reg[13], data_use_reg[14], data_use_reg[15]
-    };
     // --- main sequential block + sync inputs on posedge ---
     always@(posedge i_clk or negedge i_rst) begin
         if(!i_rst) begin
@@ -166,11 +162,12 @@ module sha256_v2(
             i_write_reg <= 1'b0;
             i_data_reg  <= 32'b0;
             i_bit_miss_reg <= 9'd0;
+            i_read_reg <= 1'b0;
 
             state <= IDLE;
             o_done <= 0;
             o_data <= 0;
-            o_read <= 0;
+            cnt_read <= 0; 
             pad <= 0;
             output_pad2 <= 0;
             calc_w <= 0;
@@ -203,25 +200,27 @@ module sha256_v2(
             i_write_reg <= i_write;
             i_data_reg  <= i_data;
             i_bit_miss_reg <= i_bit_miss;
-
+            i_read_reg <= i_read;
             state <= next_state;
             case(state)
                 IDLE: begin
                     o_done <= 1;
+                    cnt_read <= 0;
                     output_pad2 <= 0;
                     a <= H[0]; b <= H[1];
                     c <= H[2]; d <= H[3];
                     e <= H[4]; f <= H[5];
                     g <= H[6]; h <= H[7];
                     if (i_write_reg) begin
-                        data_use_reg[counter_data] <= i_data_reg;
+                        data_use[512'd511 - counter_data*512'd32 -: 512'd32] <= i_data_reg;
+
                     end
                 end
                 
                 GETDATA: begin
                     o_done <= 0;
                     if (i_write_reg) begin
-                        data_use_reg[counter_data] <= i_data_reg;
+                        data_use[512'd511 - counter_data*512'd32 -: 512'd32] <= i_data_reg;
                     end 
                     if (counter_data == 5'd16) begin
                         if (counter_i == i_N - 1) begin
@@ -233,24 +232,9 @@ module sha256_v2(
                 end
 
                 PADDING: begin
-                    data_use_reg[0]  <= padded_block[511:480];
-                    data_use_reg[1]  <= padded_block[479:448];
-                    data_use_reg[2]  <= padded_block[447:416];
-                    data_use_reg[3]  <= padded_block[415:384];
-                    data_use_reg[4]  <= padded_block[383:352];
-                    data_use_reg[5]  <= padded_block[351:320];
-                    data_use_reg[6]  <= padded_block[319:288];
-                    data_use_reg[7]  <= padded_block[287:256];
-                    data_use_reg[8]  <= padded_block[255:224];
-                    data_use_reg[9]  <= padded_block[223:192];
-                    data_use_reg[10] <= padded_block[191:160];
-                    data_use_reg[11] <= padded_block[159:128];
-                    data_use_reg[12] <= padded_block[127:96];
-                    data_use_reg[13] <= padded_block[95:64];
-                    data_use_reg[14] <= padded_block[63:32];
-                    data_use_reg[15] <= padded_block[31:0];
+                    data_use <= padded_block;
                     calc_w <= 1;
-                    if (pad && o_done) begin
+                    if (pad && output_pad2) begin
                         pad <= 0;
                     end
                 end
@@ -276,7 +260,9 @@ module sha256_v2(
                         h <= g;
                     end
                     else begin
-                        o_done <= 1;
+                        if (counter_i == i_N-1 && i_bit_miss_reg <= 9'd64) begin
+                            o_done <= 0;
+                        end else o_done <= 1;
                         H[0] <= a + H[0];
                         H[1] <= b + H[1];
                         H[2] <= c + H[2];
@@ -306,7 +292,8 @@ module sha256_v2(
 
                 FINISH: begin
                     if (i_write_reg ) begin
-                        data_use_reg[counter_data] <= i_data_reg;
+                        data_use[512'd511 - counter_data*512'd32 -: 512'd32] <= i_data_reg;
+
                     end else begin
                         if (pad) begin
                             output_pad2 <= 1;
@@ -315,27 +302,28 @@ module sha256_v2(
                 end
 
                 READ: begin
-                    case(o_read)
-                        4'd1: o_data <= H[0];
-                        4'd2: o_data <= H[1];
-                        4'd3: o_data <= H[2];
-                        4'd4: o_data <= H[3];
-                        4'd5: o_data <= H[4];
-                        4'd6: o_data <= H[5];
-                        4'd7: o_data <= H[6];
-                        4'd8: o_data <= H[7];
+                    if (i_read_reg) begin
+                        if (cnt_read < 4'd8) begin
+                            cnt_read <= cnt_read + 1;
+                        end
+                    end
+                    case(cnt_read)
+                        4'd0: o_data <= H[0];
+                        4'd1: o_data <= H[1];
+                        4'd2: o_data <= H[2];
+                        4'd3: o_data <= H[3];
+                        4'd4: o_data <= H[4];
+                        4'd5: o_data <= H[5];
+                        4'd6: o_data <= H[6];
+                        4'd7: o_data <= H[7];
                         default: o_data <= 0;
                     endcase
-                    if (o_read == 4'd8) begin
-                        o_read <= 4'd0;
-                    end else o_read <= o_read + 1;
                 end
                 default: state <= IDLE;
             endcase
         end
     end
 
-    // ... same functions and t1/t2 wiring as before ...
     function [31:0] func_ch;
         input [31:0] x, y, z;
         begin
